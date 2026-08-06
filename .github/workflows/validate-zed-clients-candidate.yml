@@ -1,0 +1,22 @@
+name: Validate zed-clients polyglot candidate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/validate-zed-clients-candidate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sdk:
+    uses: zed-pkg-test/zed-pkg-e2e/.github/workflows/reusable-polyglot-sdk-matrix.yml@fix/polyglot-e2e-toolchains-20260806
+    with:
+      client_repository: zed-pkg/zed-clients
+      client_ref: main
+      interfaces_repository: zed-pkg/zed-interfaces
+      interfaces_ref: main
+    secrets:
+      CLIENT_SDK_READ_TOKEN: ${{ secrets.TEST_FLEET_READ_TOKEN }}
