@@ -1,0 +1,270 @@
+name: zed-tool frozen offline profile
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/zed-tool-offline-profile.yml"
+      - ".zed-tool-candidate-ref"
+      - "scripts/zed_tool_offline_profile.py"
+      - "scripts/run_zed_tool_offline_profile.py"
+      - "docs/zed-tool-offline-profile.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/zed-tool-offline-profile.yml"
+      - ".zed-tool-candidate-ref"
+      - "scripts/zed_tool_offline_profile.py"
+      - "scripts/run_zed_tool_offline_profile.py"
+      - "docs/zed-tool-offline-profile.md"
+  workflow_dispatch:
+    inputs:
+      zed_cli_ref:
+        description: Optional full zed-cli commit override
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zed-tool-offline-profile-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZED_INTERFACES_REF: a23cdd2ac509a39ca6fd6d21a3774fdd3a0f7660
+
+jobs:
+  quality:
+    name: exact candidate Rust quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out certification harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Load immutable candidate pin
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          override="${{ github.event.inputs.zed_cli_ref || '' }}"
+          if [[ -n "$override" ]]; then
+            ref="$override"
+          else
+            ref="$(tr -d '[:space:]' < harness/.zed-tool-candidate-ref)"
+          fi
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
+          printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out exact zed-cli candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: zed-cli
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out exact shared interfaces
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ${{ env.ZED_INTERFACES_REF }}
+          path: zed-interfaces
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Install pinned Rust toolchain action
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: zed-cli
+          shared-key: den-2923-quality
+
+      - name: Verify pins, formatting, focused tests, and strict Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C zed-cli rev-parse HEAD)" = "${{ steps.pin.outputs.ref }}"
+          test "$(git -C zed-interfaces rev-parse HEAD)" = "$ZED_INTERFACES_REF"
+          grep -F "rev = \"$ZED_INTERFACES_REF\"" zed-cli/Cargo.toml
+          grep -F "#$ZED_INTERFACES_REF" zed-cli/Cargo.lock
+          python3 - <<'PY'
+          from pathlib import Path
+          for source in (
+              Path('harness/scripts/zed_tool_offline_profile.py'),
+              Path('harness/scripts/run_zed_tool_offline_profile.py'),
+          ):
+              compile(source.read_text(encoding='utf-8'), str(source), 'exec')
+          PY
+          cargo fmt --all --check --manifest-path zed-cli/Cargo.toml
+          cargo test --locked --manifest-path zed-cli/Cargo.toml --lib tool_profile::tests
+          cargo test --locked --manifest-path zed-cli/Cargo.toml --test tool_profile_cli
+          cargo clippy --locked --manifest-path zed-cli/Cargo.toml \
+            --bin zed-tool --test tool_profile_cli -- -D warnings
+
+  blackbox:
+    name: offline profile / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform_os: linux
+            arch: x86_64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform_os: macos
+            arch: aarch64
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform_os: windows
+            arch: x86_64
+    steps:
+      - name: Check out certification harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Load immutable candidate pin
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          override="${{ github.event.inputs.zed_cli_ref || '' }}"
+          if [[ -n "$override" ]]; then
+            ref="$override"
+          else
+            ref="$(tr -d '[:space:]' < harness/.zed-tool-candidate-ref)"
+          fi
+          [[ "$ref" =~ ^[0-9a-f]{40}$ ]]
+          printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out exact zed-cli candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-cli
+          ref: ${{ steps.pin.outputs.ref }}
+          path: zed-cli
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out exact shared interfaces
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ${{ env.ZED_INTERFACES_REF }}
+          path: zed-interfaces
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Install pinned Python runtime
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: ""
+
+      - name: Install pinned Rust toolchain action
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: zed-cli
+          shared-key: den-2923-${{ matrix.os }}
+
+      - name: Build exact zed-tool binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C zed-cli rev-parse HEAD)" = "${{ steps.pin.outputs.ref }}"
+          test "$(git -C zed-interfaces rev-parse HEAD)" = "$ZED_INTERFACES_REF"
+          cargo build --locked --release --manifest-path zed-cli/Cargo.toml --bin zed-tool
+          binary="zed-cli/target/release/zed-tool"
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            binary="${binary}.exe"
+          fi
+          test -f "$binary"
+          printf 'binary=%s\n' "$binary" >> "$GITHUB_ENV"
+
+      - name: Run independent frozen/offline profile contract
+        shell: bash
+        env:
+          WORK_ROOT: ${{ runner.temp }}/zed-tool-offline-profile
+        run: |
+          set -euo pipefail
+          test ! -e "$WORK_ROOT"
+          python harness/scripts/run_zed_tool_offline_profile.py \
+            --zed-tool "$binary" \
+            --work-root "$WORK_ROOT" \
+            --target "${{ matrix.target }}" \
+            --os "${{ matrix.platform_os }}" \
+            --arch "${{ matrix.arch }}" \
+            --candidate "${{ steps.pin.outputs.ref }}" \
+            2>&1 | tee "$RUNNER_TEMP/zed-tool-offline-profile.log"
+
+      - name: Prove all source checkouts remain immutable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git -C harness status --porcelain=v1 --untracked-files=all)"
+          test -z "$(git -C zed-cli status --porcelain=v1 --untracked-files=all)"
+          test -z "$(git -C zed-interfaces status --porcelain=v1 --untracked-files=all)"
+
+      - name: Collect bounded diagnostics
+        if: failure()
+        shell: bash
+        env:
+          WORK_ROOT: ${{ runner.temp }}/zed-tool-offline-profile
+        run: |
+          set +e
+          diagnostics="$RUNNER_TEMP/zed-tool-offline-diagnostics"
+          mkdir -p "$diagnostics"
+          cp "$RUNNER_TEMP/zed-tool-offline-profile.log" "$diagnostics/workflow.log" 2>/dev/null || true
+          cp "$WORK_ROOT/evidence/transcript.log" "$diagnostics/transcript.log" 2>/dev/null || true
+          cp "$WORK_ROOT/evidence/result.json" "$diagnostics/result.json" 2>/dev/null || true
+          git -C harness status --porcelain=v1 --untracked-files=all > "$diagnostics/harness-status.txt" 2>&1
+          git -C zed-cli status --porcelain=v1 --untracked-files=all > "$diagnostics/zed-cli-status.txt" 2>&1
+          git -C zed-interfaces status --porcelain=v1 --untracked-files=all > "$diagnostics/interfaces-status.txt" 2>&1
+
+      - name: Upload pass evidence
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zed-tool-offline-profile-${{ runner.os }}-${{ steps.pin.outputs.ref }}
+          path: ${{ runner.temp }}/zed-tool-offline-profile/evidence
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zed-tool-offline-profile-failure-${{ runner.os }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/zed-tool-offline-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: false
