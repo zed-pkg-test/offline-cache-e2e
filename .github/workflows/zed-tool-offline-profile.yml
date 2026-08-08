@@ -216,7 +216,7 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e "$WORK_ROOT"
-          python3 harness/scripts/run_zed_tool_offline_profile.py \
+          python harness/scripts/run_zed_tool_offline_profile.py \
             --zed-tool "$binary" \
             --work-root "$WORK_ROOT" \
             --target "${{ matrix.target }}" \
