@@ -1,0 +1,135 @@
+name: materialize Windows zed-tool executable sync repair
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/materialize-windows-tool-sync.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: materialize-windows-zed-tool-sync-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    name: exact product patch and black-box proof
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Check out certification harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out exact failing product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-cli
+          ref: 9c325e54a4058c8e55500639f1b18caffa8973c9
+          path: zed-cli
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out exact shared interfaces
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: a23cdd2ac509a39ca6fd6d21a3774fdd3a0f7660
+          path: zed-interfaces
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Install pinned Python runtime
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6.0.0
+        with:
+          python-version: "3.12"
+          check-latest: false
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Apply the constrained product repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C zed-cli rev-parse HEAD)" = 9c325e54a4058c8e55500639f1b18caffa8973c9
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("zed-cli/src/tool_profile.rs")
+          text = path.read_text(encoding="utf-8")
+          old = """        File::open(destination)?.sync_all()?;\n"""
+          new = """        OpenOptions::new()\n            .write(true)\n            .open(destination)\n            .with_context(|| {\n                format!(\n                    \"opening copied tool executable `{}` for synchronization\",\n                    portable_display(destination)\n                )\n            })?\n            .sync_all()\n            .with_context(|| {\n                format!(\n                    \"synchronizing copied tool executable `{}`\",\n                    portable_display(destination)\n                )\n            })?;\n"""
+          if text.count(old) != 1:
+              raise SystemExit("expected exactly one read-only copied-executable sync handle")
+          text = text.replace(old, new, 1)
+
+          marker = """    #[test]\n    fn profile_state_is_secret_free_by_shape() {\n        let state = ToolProfileState {\n            schema: TOOL_PROFILE_SCHEMA_V1.to_string(),\n            lock_sha256: \"a\".repeat(64),\n            target: \"x86_64-linux\".to_string(),\n            tools: Vec::new(),\n        };\n        let json = serde_json::to_string(&state).unwrap();\n        for forbidden in [\"locator\", \"url\", \"token\", \"credential\", \"environment\"] {\n            assert!(!json.contains(forbidden));\n        }\n    }\n}\n"""
+          replacement = marker[:-2] + """\n\n    #[cfg(windows)]\n    #[test]\n    fn copied_windows_executable_is_opened_with_sync_capable_access() {\n        let root = tempfile::tempdir().unwrap();\n        let source = root.path().join(\"hello.cmd\");\n        let destination = root.path().join(\"hello-copy.cmd\");\n        fs::write(&source, b\"@echo off\\r\\necho hello\\r\\n\").unwrap();\n\n        materialize_executable(&source, &destination).unwrap();\n\n        assert_eq!(fs::read(destination).unwrap(), fs::read(source).unwrap());\n    }\n}\n"""
+          if text.count(marker) != 1:
+              raise SystemExit("expected exact tool-profile unit-test tail")
+          path.write_text(text.replace(marker, replacement, 1), encoding="utf-8")
+          PY
+          cargo fmt --all --manifest-path zed-cli/Cargo.toml
+          changed="$(git -C zed-cli diff --name-only)"
+          test "$changed" = src/tool_profile.rs
+          git -C zed-cli diff --check
+
+      - name: Run focused Rust and compiled CLI contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check --manifest-path zed-cli/Cargo.toml
+          cargo test --locked --manifest-path zed-cli/Cargo.toml \
+            --lib tool_profile::tests -- --nocapture --test-threads=1
+          cargo test --locked --manifest-path zed-cli/Cargo.toml \
+            --test tool_profile_cli -- --nocapture --test-threads=1
+          cargo build --locked --release --manifest-path zed-cli/Cargo.toml --bin zed-tool
+
+      - name: Re-run the independent Windows black-box contract
+        shell: bash
+        env:
+          WORK_ROOT: ${{ runner.temp }}/zed-tool-offline-profile-repaired
+        run: |
+          set -euo pipefail
+          test ! -e "$WORK_ROOT"
+          python harness/scripts/run_zed_tool_offline_profile.py \
+            --zed-tool zed-cli/target/release/zed-tool.exe \
+            --work-root "$WORK_ROOT" \
+            --target x86_64-pc-windows-msvc \
+            --os windows \
+            --arch x86_64 \
+            --candidate 9c325e54a4058c8e55500639f1b18caffa8973c9 \
+            2>&1 | tee "$RUNNER_TEMP/zed-tool-windows-repaired.log"
+
+      - name: Package exact reviewed product bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/zed-tool-windows-sync-repair"
+          mkdir -p "$output/src"
+          cp zed-cli/src/tool_profile.rs "$output/src/tool_profile.rs"
+          git -C zed-cli diff --binary -- src/tool_profile.rs > "$output/product.patch"
+          test -s "$output/product.patch"
+          sha256sum "$output/src/tool_profile.rs" "$output/product.patch" > "$output/SHA256SUMS"
+          cp "$RUNNER_TEMP/zed-tool-windows-repaired.log" "$output/black-box.log"
+
+      - name: Upload exact patch evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: den-2923-windows-sync-repair-${{ github.run_id }}
+          path: ${{ runner.temp }}/zed-tool-windows-sync-repair
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
