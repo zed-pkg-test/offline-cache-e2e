@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 
+sys.dont_write_bytecode = True
 SCRIPT = Path(__file__).with_name("zed_tool_offline_profile.py")
 SPEC = importlib.util.spec_from_file_location("zed_tool_offline_profile", SCRIPT)
 if SPEC is None or SPEC.loader is None:
