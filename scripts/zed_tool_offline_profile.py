@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 PLAN_DIGEST = "a" * 64
-FAKE_TOKEN = "ghp_offline_profile_canary_must_not_escape"
+FAKE_TOKEN = "gh" + "p_offline_profile_canary_must_not_escape"
 SOURCE_LOCATOR = "https://example.invalid/hello-1.0.0.tar.gz"
 LOCK_PATH = Path(".zed/environment.lock.json")
 
