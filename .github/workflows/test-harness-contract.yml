@@ -29,3 +29,83 @@ jobs:
         run: node scripts/validate-plan.mjs
       - name: Record profile
         run: printf '%s\n' "interop-e2e" > generated-profile.txt
+
+  den-2750-validator:
+    name: DEN-2750 current-main one-file validator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      FEATURE_BASE: d1bf8ef7c88a75292cbe8d697bfd269f30d62e2b
+      FEATURE_COMMIT: 5c2e328baf1954fd61aed0cad5867af99c17437f
+      CURRENT_MAIN: f793e7c592373242dff9ab855845c42f526db9b4
+    steps:
+      - name: Check out materialization helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          fetch-depth: 1
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out exact source feature history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ${{ env.FEATURE_COMMIT }}
+          path: interfaces
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+
+      - name: Compose narrowed validator on current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C interfaces rev-parse HEAD)" = "$FEATURE_COMMIT"
+          test "$(git -C interfaces diff --name-only "$FEATURE_BASE" "$FEATURE_COMMIT")" = src/version.rs
+          git -C interfaces cat-file -e "$CURRENT_MAIN^{commit}"
+          git -C interfaces diff --quiet "$FEATURE_BASE" "$CURRENT_MAIN" -- src/version.rs
+          git -C interfaces checkout --detach "$CURRENT_MAIN"
+          git -C interfaces checkout "$FEATURE_COMMIT" -- src/version.rs
+          python3 harness/scripts/materialize_den_2750_validator.py interfaces/src/version.rs
+          cargo fmt --all --manifest-path interfaces/Cargo.toml
+          test "$(git -C interfaces diff --name-only "$CURRENT_MAIN")" = src/version.rs
+          git -C interfaces diff --check
+
+      - name: Run strict current-main source contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check --manifest-path interfaces/Cargo.toml
+          cargo clippy --locked --manifest-path interfaces/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path interfaces/Cargo.toml --all-targets
+          cargo test --locked --manifest-path interfaces/Cargo.toml \
+            requirement_validation_rejects_malformed_dotted_ranges_only \
+            -- --exact --nocapture
+          test "$(git -C interfaces diff --name-only "$CURRENT_MAIN")" = src/version.rs
+
+      - name: Package exact source bytes and patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/den-2750-validator"
+          mkdir -p "$output/src"
+          cp interfaces/src/version.rs "$output/src/version.rs"
+          git -C interfaces diff --binary "$CURRENT_MAIN" -- src/version.rs > "$output/validator.patch"
+          test -s "$output/validator.patch"
+          sha256sum "$output/src/version.rs" "$output/validator.patch" > "$output/SHA256SUMS"
+
+      - name: Upload exact validator materialization
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: den-2750-validator-${{ github.run_id }}
+          path: ${{ runner.temp }}/den-2750-validator
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
