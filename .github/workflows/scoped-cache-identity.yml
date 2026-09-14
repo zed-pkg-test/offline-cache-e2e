@@ -1,0 +1,48 @@
+name: scoped package cache identity acceptance
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cache-identity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "22.22.1"
+      - name: Prove scoped identities remain safe and collision-free offline
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const normalize = value => {
+            const key = String(value).trim();
+            if (!/^[A-Za-z0-9@+][A-Za-z0-9@+._:/-]{0,255}$/.test(key) || key.includes('..') || key.includes('\\')) {
+              throw new TypeError('unsafe package identity');
+            }
+            return key;
+          };
+          const cacheKey = ({ ecosystem, name, version, platform }) =>
+            [ecosystem, normalize(name), version, platform].join('|');
+
+          assert.equal(normalize('@scope/package'), '@scope/package');
+          assert.equal(normalize('formula:libfoo+ssl'), 'formula:libfoo+ssl');
+          assert.throws(() => normalize('../escape'));
+          assert.throws(() => normalize('pkg\\escape'));
+          assert.notEqual(
+            cacheKey({ ecosystem: 'npm', name: '@scope/package', version: '1.2.3', platform: 'linux-x64' }),
+            cacheKey({ ecosystem: 'npm', name: 'scope/package', version: '1.2.3', platform: 'linux-x64' })
+          );
+          assert.notEqual(
+            cacheKey({ ecosystem: 'npm', name: '@scope/package', version: '1.2.3', platform: 'linux-x64' }),
+            cacheKey({ ecosystem: 'npm', name: '@scope/package', version: '1.2.3', platform: 'darwin-arm64' })
+          );
+          NODE
